@@ -1,0 +1,1600 @@
+import tkinter as tk
+from tkinter import messagebox
+import json
+import os
+from copy import deepcopy
+from collections import deque
+
+# =========================
+# 설정
+# =========================
+
+SAVE_FILE = "diamond_best_record.json"
+
+# =========================
+# 보드 생성
+# =========================
+
+valid_cells = set()
+
+# 위
+for r in range(0, 3):
+    for c in range(2, 5):
+        valid_cells.add((r, c))
+
+# 아래
+for r in range(4, 7):
+    for c in range(2, 5):
+        valid_cells.add((r, c))
+
+# 왼쪽
+for r in range(2, 5):
+    for c in range(0, 3):
+        valid_cells.add((r, c))
+
+# 오른쪽
+for r in range(2, 5):
+    for c in range(4, 7):
+        valid_cells.add((r, c))
+
+# 중앙
+for r in range(2, 5):
+    for c in range(2, 5):
+        valid_cells.add((r, c))
+
+# =========================
+# 방향
+# =========================
+
+directions = [
+    (-1, 0), (1, 0),
+    (0, -1), (0, 1),
+    (-1, -1), (-1, 1),
+    (1, -1), (1, 1)
+]
+
+# =========================
+# 연결
+# =========================
+
+connections = set()
+
+def add_connection(a, b):
+    connections.add(tuple(sorted([a, b])))
+
+squares = [
+
+    [
+        (0,2),(0,3),(0,4),
+        (1,2),(1,3),(1,4),
+        (2,2),(2,3),(2,4)
+    ],
+
+    [
+        (4,2),(4,3),(4,4),
+        (5,2),(5,3),(5,4),
+        (6,2),(6,3),(6,4)
+    ],
+
+    [
+        (2,0),(2,1),(2,2),
+        (3,0),(3,1),(3,2),
+        (4,0),(4,1),(4,2)
+    ],
+
+    [
+        (2,4),(2,5),(2,6),
+        (3,4),(3,5),(3,6),
+        (4,4),(4,5),(4,6)
+    ],
+
+    [
+        (2,2),(2,3),(2,4),
+        (3,2),(3,3),(3,4),
+        (4,2),(4,3),(4,4)
+    ]
+]
+
+for sq in squares:
+
+    sqset = set(sq)
+
+    for r, c in sq:
+
+        for dr, dc in directions:
+
+            nr, nc = r + dr, c + dc
+
+            if (nr, nc) in sqset:
+                add_connection((r, c), (nr, nc))
+
+# =========================
+# tkinter
+# =========================
+
+root = tk.Tk()
+root.title("다이아몬드 게임")
+
+root.geometry("1000x800")
+root.minsize(700, 700)
+
+canvas = tk.Canvas(root, width=700, height=700, bg="white")
+
+canvas.pack(
+    side=tk.LEFT,
+    fill=tk.BOTH,
+    expand=True
+)
+
+side_frame = tk.Frame(root)
+
+side_frame.pack(
+    side=tk.RIGHT,
+    fill=tk.Y
+)
+
+
+button_frame = tk.Frame(side_frame)
+button_frame.pack(pady=10)
+
+info_label = tk.Label(side_frame, font=("Arial", 14))
+info_label.pack()
+
+winner_label = tk.Label(side_frame, font=("Arial", 18, "bold"))
+winner_label.pack(pady=10)
+
+record_label = tk.Label(side_frame, font=("Arial", 12))
+record_label.pack()
+
+history_title = tk.Label(
+    side_frame,
+    text="이동 기록",
+    font=("Arial", 14, "bold")
+)
+
+history_title.pack()
+
+history_box = tk.Text(side_frame, width=35, height=28)
+history_box.pack(padx=10, pady=10)
+
+# =========================
+# 상태
+# =========================
+
+mode = None
+
+pieces = {}
+
+turn = "red"
+turn_count = 1
+
+selected = None
+
+hovered = None
+
+move_targets = []
+jump_targets = []
+
+last_moved = None
+
+winner_text = ""
+
+history_stack = []
+move_history = []
+redo_stack = []
+
+best_turn = None
+best_moves = []
+
+replay_index = 0
+replay_positions = []
+replay_moves = []
+replay_mode = False
+
+home_title = None
+
+# =========================
+# 저장
+# =========================
+
+def save_best_record():
+
+    if best_turn is None:
+        return
+
+    data = {
+        "best_turn": best_turn,
+        "best_moves": best_moves
+    }
+
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def load_best_record():
+
+    global best_turn
+    global best_moves
+
+    if not os.path.exists(SAVE_FILE):
+        return
+
+    with open(SAVE_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    best_turn = data.get("best_turn")
+    best_moves = data.get("best_moves", [])
+
+load_best_record()
+
+# =========================
+# 유틸
+# =========================
+
+def get_piece_radius():
+
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+
+    return min(w, h) / 48
+
+def center(r, c):
+
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+
+    # 말판이 canvas 안에 항상 들어가게
+    board_size = min(w, h) * 0.75
+
+    cell = board_size / 6
+
+    start_x = (w - board_size) / 2
+    start_y = (h - board_size) / 2
+
+    x = start_x + c * cell
+    y = start_y + r * cell
+
+    return x, y
+
+def connected(a, b):
+    return tuple(sorted([a, b])) in connections
+
+def can_move(pos):
+
+    if get_normal_moves(pos):
+        return True
+
+    if get_jump_moves(pos):
+        return True
+
+    return False
+
+# =========================
+# 버튼 제거
+# =========================
+
+def clear_buttons():
+
+    for widget in button_frame.winfo_children():
+        widget.destroy()
+
+# =========================
+# 홈
+# =========================
+
+def show_home():
+
+    global mode
+    global replay_mode
+
+    mode = None
+    replay_mode = False
+
+    canvas.delete("all")
+
+    clear_buttons()
+
+    history_box.delete("1.0", tk.END)
+
+    info_label.config(text="")
+    winner_label.config(text="")
+    record_label.config(text="")
+
+    global home_title
+
+    root.update_idletasks()
+
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+
+    home_title = canvas.create_text(
+        w / 2,
+        h * 0.2,
+        text="다이아몬드 게임",
+        font=("Arial", 32, "bold")
+    )
+
+    one_btn = tk.Button(
+        button_frame,
+        text="1인용",
+        width=20,
+        height=2,
+        command=start_single
+    )
+
+    two_btn = tk.Button(
+        button_frame,
+        text="2인용",
+        width=20,
+        height=2,
+        command=start_multi
+    )
+
+    replay_btn = tk.Button(
+        button_frame,
+        text="현재 최소횟수 보기",
+        width=20,
+        height=2,
+        command=show_best_replay
+    )
+
+    one_btn.pack(pady=10)
+    two_btn.pack(pady=10)
+    replay_btn.pack(pady=10)
+
+    help_btn = tk.Button(
+        button_frame,
+        text="단축키 도움말",
+        width=20,
+        height=2,
+        command=show_help
+    )
+
+    help_btn.pack(pady=10)
+
+# =========================
+# 초기화
+# =========================
+
+def reset_state():
+
+    global pieces
+    global turn
+    global turn_count
+    global selected
+    global move_targets
+    global jump_targets
+    global last_moved
+    global winner_text
+    global history_stack
+    global move_history
+    global redo_stack
+
+    pieces = {}
+
+    turn = "red"
+    turn_count = 1
+
+    selected = None
+
+    move_targets = []
+    jump_targets = []
+
+    last_moved = None
+
+    winner_text = ""
+
+    history_stack = []
+    move_history = []
+    redo_stack = []
+
+# =========================
+# 시작
+# =========================
+
+def start_single():
+
+    global mode
+    global replay_mode
+
+    mode = "single"
+    replay_mode = False
+
+    reset_state()
+
+    for r in range(2, 5):
+        for c in range(0, 3):
+            pieces[(r, c)] = "red"
+
+    setup_buttons()
+
+    draw_board()
+
+def start_multi():
+
+    global mode
+
+    mode = "multi"
+
+    reset_state()
+
+    for r in range(2, 5):
+        for c in range(0, 3):
+            pieces[(r, c)] = "red"
+
+    for r in range(2, 5):
+        for c in range(4, 7):
+            pieces[(r, c)] = "green"
+
+    setup_buttons()
+
+    draw_board()
+
+# =========================
+# 버튼
+# =========================
+
+def setup_buttons():
+
+    clear_buttons()
+
+    undo_btn = tk.Button(
+        button_frame,
+        text="되돌리기",
+        width=15,
+        command=undo
+    )
+
+    undo_btn.pack(pady=3)
+
+    redo_btn = tk.Button(
+        button_frame,
+        text="다시실행",
+        width=15,
+        command=redo
+    )
+
+    redo_btn.pack(pady=3)
+
+    restart_btn = tk.Button(
+        button_frame,
+        text="다시하기",
+        width=15,
+        command=restart_game
+    )
+
+    restart_btn.pack(pady=3)
+
+    home_btn = tk.Button(
+        button_frame,
+        text="홈",
+        width=15,
+        command=go_home
+    )
+
+    home_btn.pack(pady=3)
+
+# =========================
+# 홈으로 돌아가기
+# =========================
+
+def go_home():
+
+    answer = messagebox.askyesno(
+        "홈으로",
+        "홈으로 돌아가면 현재 게임이 초기화됩니다.\n그래도 돌아가시겠습니까?"
+    )
+
+    if not answer:
+        return
+
+    # 기보 초기화
+    history_box.delete("1.0", tk.END)
+
+    # 이동 기록 초기화
+    move_history.clear()
+
+    # undo 기록 초기화
+    history_stack.clear()
+
+    show_home()
+
+# =========================
+# 다시하기
+# =========================
+
+def restart_game():
+
+    answer = messagebox.askyesno(
+        "다시하기",
+        "정말 다시하시겠습니까?"
+    )
+
+    if not answer:
+        return
+
+    # 기보창 완전 초기화
+    history_box.delete("1.0", tk.END)
+
+    # 이동 기록 초기화
+    move_history.clear()
+
+    # undo 기록 초기화
+    history_stack.clear()
+
+    if mode == "single":
+        start_single()
+
+    elif mode == "multi":
+        start_multi()
+
+# =========================
+# 이동 계산
+# =========================
+
+def get_normal_moves(pos):
+
+    r, c = pos
+
+    result = []
+
+    for dr, dc in directions:
+
+        nr, nc = r + dr, c + dc
+
+        if (
+            (nr, nc) in valid_cells
+            and (nr, nc) not in pieces
+            and connected((r, c), (nr, nc))
+        ):
+            result.append((nr, nc))
+
+    return result
+
+def get_jump_moves(start):
+
+    visited = set()
+    visited.add(start)
+
+    q = deque([start])
+
+    result = set()
+
+    while q:
+
+        r, c = q.popleft()
+
+        for dr, dc in directions:
+
+            mr, mc = r + dr, c + dc
+            jr, jc = r + 2 * dr, c + 2 * dc
+
+            if (
+                (mr, mc) in valid_cells
+                and (jr, jc) in valid_cells
+                and (mr, mc) in pieces
+                and (jr, jc) not in pieces
+                and connected((r, c), (mr, mc))
+                and connected((mr, mc), (jr, jc))
+            ):
+
+                nxt = (jr, jc)
+
+                if nxt not in visited:
+                    visited.add(nxt)
+                    result.add(nxt)
+                    q.append(nxt)
+
+    return list(result)
+
+def get_jump_path(start, end):
+
+    q = deque()
+    q.append((start, [start]))
+
+    while q:
+
+        now, path = q.popleft()
+
+        if now == end:
+            return path
+
+        r, c = now
+
+        for dr, dc in directions:
+
+            mr, mc = r + dr, c + dc
+            jr, jc = r + 2 * dr, c + 2 * dc
+
+            if (
+                (mr, mc) in valid_cells
+                and (jr, jc) in valid_cells
+                and (mr, mc) in pieces
+                and (jr, jc) not in pieces
+                and connected((r, c), (mr, mc))
+                and connected((mr, mc), (jr, jc))
+            ):
+
+                nxt = (jr, jc)
+
+                # 현재 경로 안에 없는 경우만
+                if nxt not in path:
+
+                    q.append(
+                        (nxt, path + [nxt])
+                    )
+
+    return [start, end]
+
+# =========================
+# 기록
+# =========================
+
+def refresh_history():
+
+    history_box.delete("1.0", tk.END)
+
+    for i, mv in enumerate(move_history, start=1):
+
+        history_box.insert(
+            tk.END,
+            f"{i}. {mv['color']} : {mv['from']} → {mv['to']}\n"
+        )
+
+    history_box.see(tk.END)
+
+# =========================
+# 상태 저장
+# =========================
+
+def save_state():
+
+    history_stack.append({
+        "pieces": deepcopy(pieces),
+        "turn": turn,
+        "turn_count": turn_count,
+        "selected": selected,
+        "move_targets": deepcopy(move_targets),
+        "jump_targets": deepcopy(jump_targets),
+        "last_moved": last_moved,
+        "winner_text": winner_text,
+        "move_history": deepcopy(move_history)
+    })
+
+# =========================
+# 되돌리기
+# =========================
+
+def undo():
+
+    global pieces
+    global turn
+    global turn_count
+    global selected
+    global move_targets
+    global jump_targets
+    global last_moved
+    global winner_text
+    global move_history
+    global redo_stack
+
+    if not history_stack:
+        return
+
+    redo_stack.append({
+        "pieces": deepcopy(pieces),
+        "turn": turn,
+        "turn_count": turn_count,
+        "selected": selected,
+        "move_targets": deepcopy(move_targets),
+        "jump_targets": deepcopy(jump_targets),
+        "last_moved": last_moved,
+        "winner_text": winner_text,
+        "move_history": deepcopy(move_history)
+    })
+
+    st = history_stack.pop()
+
+    pieces = st["pieces"]
+    turn = st["turn"]
+    turn_count = st["turn_count"]
+
+    selected = st["selected"]
+
+    move_targets = st["move_targets"]
+    jump_targets = st["jump_targets"]
+
+    last_moved = st["last_moved"]
+
+    winner_text = st["winner_text"]
+
+    move_history = st["move_history"]
+
+    refresh_history()
+
+    draw_board()
+
+# =========================
+# 다시실행
+# =========================
+
+def redo():
+
+    global pieces
+    global turn
+    global turn_count
+    global selected
+    global move_targets
+    global jump_targets
+    global last_moved
+    global winner_text
+    global move_history
+
+    if not redo_stack:
+        return
+
+    save_state()
+
+    st = redo_stack.pop()
+
+    pieces = st["pieces"]
+    turn = st["turn"]
+    turn_count = st["turn_count"]
+
+    selected = st["selected"]
+
+    move_targets = st["move_targets"]
+    jump_targets = st["jump_targets"]
+
+    last_moved = st["last_moved"]
+
+    winner_text = st["winner_text"]
+
+    move_history = st["move_history"]
+
+    refresh_history()
+
+    draw_board()
+
+# =========================
+# 승리 판정
+# =========================
+
+def check_win():
+
+    global winner_text
+    global best_turn
+    global best_moves
+
+    if mode == "multi":
+
+        red_goal = {
+            (2,4),(2,5),(2,6),
+            (3,4),(3,5),(3,6),
+            (4,4),(4,5),(4,6)
+        }
+
+        green_goal = {
+            (2,0),(2,1),(2,2),
+            (3,0),(3,1),(3,2),
+            (4,0),(4,1),(4,2)
+        }
+
+        red_win = all(
+            pos in pieces and pieces[pos] == "red"
+            for pos in red_goal
+        )
+
+        green_win = all(
+            pos in pieces and pieces[pos] == "green"
+            for pos in green_goal
+        )
+
+        if red_win:
+            winner_text = "빨강 승리!"
+
+        elif green_win:
+            winner_text = "초록 승리!"
+
+        else:
+            winner_text = ""
+
+    else:
+
+        goal = {
+            (2,4),(2,5),(2,6),
+            (3,4),(3,5),(3,6),
+            (4,4),(4,5),(4,6)
+        }
+
+        success = all(
+            pos in pieces and pieces[pos] == "red"
+            for pos in goal
+        )
+
+        if success:
+
+            winner_text = "성공!"
+
+            used_turn = turn_count - 1
+
+            if best_turn is None or used_turn < best_turn:
+
+                best_turn = used_turn
+
+                best_moves = deepcopy(move_history)
+
+                save_best_record()
+
+        else:
+            winner_text = ""
+
+# =========================
+# 턴 종료
+# =========================
+
+def end_turn():
+
+    global turn
+    global turn_count
+    global selected
+    global move_targets
+    global jump_targets
+
+    selected = None
+
+    move_targets = []
+    jump_targets = []
+
+    turn_count += 1
+
+    if mode == "multi":
+        turn = "green" if turn == "red" else "red"
+
+    check_win()
+
+    draw_board()
+
+# =========================
+# 그리기
+# =========================
+
+def draw_board():
+
+    canvas.delete("all")
+
+    piece_r = get_piece_radius()
+
+    hole_r = get_piece_radius() * 0.6
+
+    # 현재 턴 테두리 강조
+    if mode == "multi":
+        border_color = "#d88c8c" if turn == "red" else "#8cbf8c"
+
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+
+        margin = 5
+
+        canvas.create_rectangle(
+            margin,
+            margin,
+            w - margin,
+            h - margin,
+            outline=border_color,
+            width=8
+        )
+
+    # 이동 가능 표시
+    for r, c in move_targets:
+
+        x, y = center(r, c)
+
+        canvas.create_oval(
+            x - piece_r * 0.8,
+            y - piece_r * 0.8,
+            x + piece_r * 0.8,
+            y + piece_r * 0.8,
+            fill="#66aaff",
+            outline=""
+        )
+
+    for r, c in jump_targets:
+
+        x, y = center(r, c)
+
+        canvas.create_oval(
+            x - 12,
+            y - 12,
+            x + 12,
+            y + 12,
+            fill="#55dd55",
+            outline=""
+        )
+
+    # 선
+    for a, b in connections:
+
+        x1, y1 = center(*a)
+        x2, y2 = center(*b)
+
+        canvas.create_line(
+            x1, y1,
+            x2, y2,
+            fill="gray",
+            width=2
+        )
+
+    # 구멍
+    for r, c in valid_cells:
+
+        x, y = center(r, c)
+
+        hole_color = "white"
+
+        if mode == "single":
+
+            if (r, c) in {
+                (2, 4), (2, 5), (2, 6),
+                (3, 4), (3, 5), (3, 6),
+                (4, 4), (4, 5), (4, 6)
+            }:
+                hole_color = "#ddffdd"
+
+        elif mode == "multi":
+
+            red_goal = {
+                (2, 4), (2, 5), (2, 6),
+                (3, 4), (3, 5), (3, 6),
+                (4, 4), (4, 5), (4, 6)
+            }
+
+            green_goal = {
+                (2, 0), (2, 1), (2, 2),
+                (3, 0), (3, 1), (3, 2),
+                (4, 0), (4, 1), (4, 2)
+            }
+
+            if (r, c) in red_goal:
+                hole_color = "#ddffdd"
+
+            elif (r, c) in green_goal:
+                hole_color = "#ffdddd"
+
+        canvas.create_oval(
+            x - hole_r,
+            y - hole_r,
+            x + hole_r,
+            y + hole_r,
+            fill=hole_color,
+            outline="black",
+            width=2
+        )
+
+    # 마지막 이동
+    if last_moved:
+
+        x, y = center(*last_moved)
+
+        canvas.create_oval(
+            x - piece_r * 1.7,
+            y - piece_r * 1.7,
+            x + piece_r * 1.7,
+            y + piece_r * 1.7,
+            outline="gold",
+            width=4
+        )
+
+    # 말
+    for pos, color in pieces.items():
+
+        piece_color = color
+
+        if not can_move(pos):
+
+            if color == "red":
+                piece_color = "#ff9999"
+
+            elif color == "green":
+                piece_color = "#99dd99"
+
+        x, y = center(*pos)
+
+        canvas.create_oval(
+            x - piece_r,
+            y - piece_r,
+            x + piece_r,
+            y + piece_r,
+            fill=piece_color,
+            outline="black",
+            width=2
+        )
+
+    # hover 표시
+    if hovered and hovered != selected:
+
+        if can_move(hovered):
+            x, y = center(*hovered)
+
+            canvas.create_oval(
+                x - piece_r * 1.6,
+                y - piece_r * 1.6,
+                x + piece_r * 1.6,
+                y + piece_r * 1.6,
+                outline="#bbbbbb",
+                width=2
+            )
+
+    # 선택
+    if selected:
+
+        x, y = center(*selected)
+
+        canvas.create_oval(
+            x - piece_r * 2,
+            y - piece_r * 2,
+            x + piece_r * 2,
+            y + piece_r * 2,
+            outline="blue",
+            width=4
+        )
+
+    # 정보
+    if mode == "multi":
+
+        info_label.config(
+            text=f"{turn_count}턴 | 현재 차례: {'빨강' if turn == 'red' else '초록'}"
+        )
+
+        record_label.config(text="")
+
+    elif mode == "single":
+
+        info_label.config(
+            text=f"{turn_count}턴"
+        )
+
+        if best_turn is None:
+            record_label.config(
+                text="현재 최소횟수 : 없음"
+            )
+
+        else:
+            record_label.config(
+                text=f"현재 최소횟수 : {best_turn}"
+            )
+
+    winner_label.config(text=winner_text)
+
+# =========================
+# 클릭
+# =========================
+
+def click(event):
+
+    global selected
+    global move_targets
+    global jump_targets
+    global last_moved
+
+    if mode is None:
+        return
+
+    x = event.x
+    y = event.y
+
+    clicked = None
+
+    for r, c in valid_cells:
+
+        cx, cy = center(r, c)
+
+        if (x - cx) ** 2 + (y - cy) ** 2 <= 30 ** 2:
+            clicked = (r, c)
+            break
+
+    if clicked is None:
+
+        selected = None
+
+        move_targets = []
+        jump_targets = []
+
+        draw_board()
+
+        return
+
+    # 이동
+    if selected:
+
+        if clicked in move_targets or clicked in jump_targets:
+
+            save_state()
+            redo_stack.clear()
+
+            old = selected
+
+            pieces[clicked] = pieces[selected]
+
+            del pieces[selected]
+
+            path = [old, clicked]
+
+            if clicked in jump_targets:
+                path = get_jump_path(old, clicked)
+
+            move_history.append({
+                "color": turn,
+                "from": old,
+                "to": clicked,
+                "path": path
+            })
+
+            refresh_history()
+
+            last_moved = clicked
+
+            end_turn()
+
+            return
+
+        # 이동 불가능한 칸 클릭 시 선택 취소
+        selected = None
+
+        move_targets = []
+        jump_targets = []
+
+        draw_board()
+
+        return
+
+    # 새 선택
+    if clicked in pieces:
+
+        # 이미 선택된 말을 다시 클릭하면 선택 해제
+        if clicked == selected:
+            selected = None
+
+            move_targets = []
+            jump_targets = []
+
+            draw_board()
+
+            return
+
+        if mode == "single":
+
+            if pieces[clicked] != "red":
+                return
+
+        else:
+
+            if pieces[clicked] != turn:
+                return
+
+        selected = clicked
+
+        move_targets = get_normal_moves(clicked)
+        jump_targets = get_jump_moves(clicked)
+
+        # 움직일 수 없는 말이면 자동 해제
+        if not move_targets and not jump_targets:
+            draw_board()
+
+            root.after(
+                120,
+                cancel_selection
+            )
+
+            return
+
+        draw_board()
+
+def motion(event):
+
+    global hovered
+
+    if mode is None:
+        return
+
+    hovered = None
+
+    x = event.x
+    y = event.y
+
+    for r, c in valid_cells:
+
+        cx, cy = center(r, c)
+
+        if (x - cx) ** 2 + (y - cy) ** 2 <= 30 ** 2:
+
+            if (r, c) in pieces:
+
+                # 현재 차례의 말만 hover
+                if mode == "single":
+
+                    if pieces[(r, c)] == "red":
+                        hovered = (r, c)
+
+                else:
+
+                    if pieces[(r, c)] == turn:
+                        hovered = (r, c)
+
+            break
+
+    draw_board()
+
+# =========================
+# 최소기록 replay
+# =========================
+
+def show_best_replay():
+
+    global replay_positions
+    global replay_moves
+    global replay_index
+    global mode
+    global replay_mode
+
+    if best_turn is None:
+
+        messagebox.showinfo(
+            "정보",
+            "저장된 최소 기록이 없습니다."
+        )
+
+        return
+
+    mode = None
+    replay_mode = True
+
+    clear_buttons()
+
+    replay_moves = deepcopy(best_moves)
+
+    replay_positions = []
+
+    replay_index = 0
+
+    st = {}
+
+    for r in range(2, 5):
+        for c in range(0, 3):
+            st[(r, c)] = "red"
+
+    replay_positions.append(deepcopy(st))
+
+    for mv in replay_moves:
+
+        ns = deepcopy(replay_positions[-1])
+
+        a = tuple(mv["from"])
+        b = tuple(mv["to"])
+
+        ns[b] = ns[a]
+
+        del ns[a]
+
+        replay_positions.append(ns)
+
+    replay_buttons()
+
+    draw_replay()
+
+def replay_buttons():
+
+    prev_btn = tk.Button(
+        button_frame,
+        text="이전 턴",
+        width=15,
+        command=prev_replay
+    )
+
+    prev_btn.pack(pady=3)
+
+    next_btn = tk.Button(
+        button_frame,
+        text="다음 턴",
+        width=15,
+        command=next_replay
+    )
+
+    next_btn.pack(pady=3)
+
+    reset_btn = tk.Button(
+        button_frame,
+        text="처음부터",
+        width=15,
+        command=reset_replay
+    )
+
+    reset_btn.pack(pady=3)
+
+    home_btn = tk.Button(
+        button_frame,
+        text="홈",
+        width=15,
+        command=show_home
+    )
+
+    home_btn.pack(pady=3)
+
+def draw_replay():
+
+    canvas.delete("all")
+
+    piece_r = get_piece_radius()
+    hole_r = get_piece_radius() * 0.6
+
+    # 선
+    for a, b in connections:
+
+        x1, y1 = center(*a)
+        x2, y2 = center(*b)
+
+        canvas.create_line(
+            x1, y1,
+            x2, y2,
+            fill="gray",
+            width=2
+        )
+
+    # 구멍
+    for r, c in valid_cells:
+
+        x, y = center(r, c)
+
+        canvas.create_oval(
+            x - hole_r,
+            y - hole_r,
+            x + hole_r,
+            y + hole_r,
+            fill="white",
+            outline="black",
+            width=2
+        )
+
+    st = replay_positions[replay_index]
+
+    for pos, color in st.items():
+
+        x, y = center(*pos)
+
+        canvas.create_oval(
+            x - piece_r,
+            y - piece_r,
+            x + piece_r,
+            y + piece_r,
+            fill=color,
+            outline="black",
+            width=2
+        )
+
+    info_label.config(
+        text=f"기보 재생 : {replay_index}/{best_turn}"
+    )
+
+    winner_label.config(
+        text=f"최소횟수 : {best_turn}"
+    )
+
+    history_box.delete("1.0", tk.END)
+
+    for i, mv in enumerate(replay_moves):
+
+        path_text = " → ".join(
+            str(p)
+            for p in mv.get(
+                "path",
+                [mv["from"], mv["to"]]
+            )
+        )
+
+        # 현재 진행 중인 턴 표시
+        if i + 1 == replay_index:
+
+            history_box.insert(
+                tk.END,
+                f">>> {i + 1}. {mv['from']} → {mv['to']} <<<\n"
+            )
+
+        else:
+
+            history_box.insert(
+                tk.END,
+                f"{i + 1}. {mv['from']} → {mv['to']}\n"
+            )
+
+def next_replay():
+
+    global replay_index
+
+    if replay_index < len(replay_positions) - 1:
+
+        replay_index += 1
+
+        draw_replay()
+
+def prev_replay():
+
+    global replay_index
+
+    if replay_index > 0:
+
+        replay_index -= 1
+
+        draw_replay()
+
+def reset_replay():
+
+    global replay_index
+
+    replay_index = 0
+
+    draw_replay()
+
+# =========================
+# replay 키 조작
+# =========================
+
+def replay_key(event):
+
+    if not replay_mode:
+        return
+
+    # 오른쪽 화살표
+    if event.keysym == "Right":
+        next_replay()
+
+    # 왼쪽 화살표
+    elif event.keysym == "Left":
+        prev_replay()
+
+def update_home_title():
+
+    global home_title
+
+    if home_title is None:
+        return
+
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+
+    canvas.coords(
+        home_title,
+        w / 2,
+        h * 0.2
+    )
+
+def resize_redraw(event):
+
+    if replay_mode:
+
+        draw_replay()
+
+    elif mode is not None:
+
+        draw_board()
+
+    else:
+
+        update_home_title()
+
+# =========================
+# 선택 취소
+# =========================
+
+def cancel_selection(event=None):
+
+    global selected
+    global move_targets
+    global jump_targets
+
+    selected = None
+
+    move_targets = []
+    jump_targets = []
+
+    draw_board()
+
+# =========================
+# 단축키
+# =========================
+
+def shortcut_key(event):
+
+    key = event.keysym.lower()
+
+    if key == "h":
+        go_home()
+
+    elif key == "r":
+        restart_game()
+
+    elif key == "u":
+        undo()
+
+# =========================
+# 단축키 도움말
+# =========================
+
+def show_help():
+
+    help_window = tk.Toplevel(root)
+
+    help_window.title("단축키 도움말")
+
+    win_w = 300
+    win_h = 210
+
+    # 메인 창 기준 중앙 배치
+    root_x = root.winfo_x()
+    root_y = root.winfo_y()
+
+    root_w = root.winfo_width()
+    root_h = root.winfo_height()
+
+    x = root_x + (root_w - win_w) // 2
+    y = root_y + (root_h - win_h) // 2
+
+    help_window.geometry(
+        f"{win_w}x{win_h}+{x}+{y}"
+    )
+
+    help_window.resizable(False, False)
+
+    text = (
+        "[단축키]\n\n"
+        "H : 홈으로\n"
+        "R : 다시하기\n"
+        "U : 되돌리기\n"
+        "ESC : 선택 취소\n"
+        "← → : 최소기록 replay 이동\n"
+    )
+
+    label = tk.Label(
+        help_window,
+        text=text,
+        font=("Arial", 13),
+        justify="left"
+    )
+
+    label.pack(
+        padx=25,
+        pady=(18, 2),
+        anchor="w"
+    )
+
+    close_btn = tk.Button(
+        help_window,
+        text="닫기",
+        width=10,
+        height=1,
+        command=help_window.destroy
+    )
+
+    close_btn.pack(pady=2)
+
+# =========================
+# 실행
+# =========================
+
+canvas.bind("<Button-1>", click)
+canvas.bind("<Motion>", motion)
+
+# 단축키 연결
+root.bind("<Right>", replay_key)
+root.bind("<Left>", replay_key)
+
+root.bind("<Escape>", cancel_selection)
+
+root.bind("h", shortcut_key)
+root.bind("r", shortcut_key)
+root.bind("u", shortcut_key)
+
+# 창 크기 변경 대응
+root.bind("<Configure>", resize_redraw)
+
+show_home()
+
+root.mainloop()
